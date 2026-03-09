@@ -1,0 +1,103 @@
+language: rust
+diff_based_generation: true
+max_parallel_iterations: 1
+max_solution_length: 80000
+
+llm:
+  api_base: https://api.openai.com/v1
+  models:
+    - name: "gpt-5.4"
+      weight: 1.0
+  max_tokens: 32000
+  timeout: 600
+
+search:
+  type: adaevolve
+  num_context_programs: 4
+  database:
+    population_size: 20
+    num_islands: 2
+
+monitor:
+  enabled: true
+
+evaluator:
+  timeout: 300
+  max_retries: 2
+  cascade_evaluation: false
+
+prompt:
+  system_message: |
+    You are an expert Rust SIMD/performance engineer.
+    Only modify code within EVOLVE-BLOCK-START and EVOLVE-BLOCK-END.
+
+    **TASK:** Optimize the RaBitQ fast-scan distance hot path in
+    `RabitqFastScanOracle` to maximize QPS on the `bench_rabitq_fast_scan_distance`
+    benchmark.
+
+    **WHAT THE BENCHMARK MEASURES:**
+    The evaluator temporarily swaps your evolved file into the sibling `scratch`
+    project, then builds and runs a dedicated benchmark driver with:
+    `RUSTFLAGS="-C target-cpu=native" cargo build --release`.
+
+    Your editable file is intentionally tiny: `initial_program.rs` contains only
+    the hot-path impl block. The evaluator splices that block into a fixed
+    `source_template.rs` before compiling.
+
+    The driver:
+    1. Builds a deterministic synthetic 768D dataset.
+    2. Creates a `RabitqFastScan<768>` index once.
+    3. Runs multiple deterministic queries.
+    4. For each query, creates one oracle and scans every block via
+       `compute_block_distances(block_idx)`.
+    5. Computes a rolling checksum over every returned `(idx, distance.to_bits())`.
+
+    **RABITQ BACKGROUND FROM THE PAPERS:**
+    In the 2024 RaBitQ paper, Gao and Long propose a randomized binary
+    quantization scheme for high-dimensional Euclidean ANN. The key point for
+    this benchmark is that each vector is compressed to a 1-bit-per-dimension
+    sign code, but the search-time distance estimate is not just a raw Hamming
+    distance. Instead, the implementation reconstructs an approximate L2
+    distance from:
+    - a query-dependent inner-product term computed from the binary code
+    - per-vector correction/rescaling factors produced at index-build time
+    - query-side additive terms
+
+    In other words, the hot path here is the practical realization of the
+    paper's idea that very compact binary codes can still support accurate
+    Euclidean-distance estimation when paired with the right reconstruction
+    formula and error-aware factors.
+
+    The same paper also emphasizes efficient distance computation using bitwise
+    operations or SIMD. In this codebase, `compute_block_raw` is exactly that
+    SIMD-oriented stage: it uses packed 32-vector blocks plus LUT-based
+    FastScan accumulation to produce 32 raw inner-product-like scores, which
+    `compute_block_distances` then dequantizes and converts into approximate L2
+    distances.
+
+    **TARGET HOT PATH:**
+    The evolvable region contains only:
+    - `compute_block_raw`
+    - `compute_block_distances`
+
+    These methods run once per scanned block. The critical work is:
+    - slice/pointer setup for one packed-code block
+    - SIMD/scalar FastScan dispatch to produce 32 `u16` raw inner products
+    - dequantization of those 32 scores
+    - combining them with per-vector factors into 32 `(usize, f32)` outputs
+
+    **CORRECTNESS CONSTRAINT:**
+    The checksum must match exactly. Any change to indices or floating-point output
+    bits scores **zero**. Only semantics-preserving rewrites are accepted.
+
+    **OPTIMIZATION DIRECTIONS:**
+    - Reduce bounds-check and slice-construction overhead in the hot path.
+    - Hoist repeated loads and pointer arithmetic.
+    - Avoid unnecessary temporary work while preserving exact results.
+    - Use unchecked indexing or raw pointers when it is demonstrably safe.
+    - Keep the public method signatures identical.
+
+    **RULES:**
+    - Do not change code outside the EVOLVE-BLOCK markers.
+    - Preserve exact output values and ordering.
+    - The result must compile in release mode with `target-cpu=native`.
