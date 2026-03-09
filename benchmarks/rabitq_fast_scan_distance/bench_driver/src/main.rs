@@ -2,9 +2,9 @@ use scratch::data_handling::dataset::VectorDataset;
 use scratch::data_handling::rabitq_fast_scan::{RabitqFastScan, BLOCK_SIZE};
 use std::time::Instant;
 
-const DIM: usize = 768;
-const N_VECS: usize = 65_536;
-const N_QUERIES: usize = 16;
+const DIM: usize = 1536;
+const N_VECS: usize = 1024 * 64;
+const N_QUERIES: usize = 64;
 const OUTER_ITERS: usize = 6;
 const WARMUP_QUERIES: usize = 2;
 
