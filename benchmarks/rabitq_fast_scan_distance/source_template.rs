@@ -373,13 +373,7 @@ pub mod rabitq_fast_scan_kernels {
         avx512_impl::fast_scan_avx512::<B>(packed_codes, luts, results);
     }
 
-    /// Explicitly call the AVX2 implementation (for benchmarking).
-    /// Panics if AVX2 is not available.
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    #[inline]
-    pub fn fast_scan_avx2<const B: usize>(packed_codes: &[u8], luts: &[u8], results: &mut [u16]) {
-        avx2_impl::fast_scan_avx2::<B>(packed_codes, luts, results);
-    }
+    __EVOLVE_AVX2_BLOCK__
 
     /// Explicitly call the scalar reference implementation (for benchmarking).
     #[inline]
@@ -514,123 +508,6 @@ pub mod rabitq_fast_scan_kernels {
             for i in 0..n_blocks {
                 unsafe {
                     accumulate_one_block_avx512::<B>(
-                        codes_ptr.add(i * block_size_bytes),
-                        luts_ptr,
-                        results_ptr.add(i * 32),
-                    )
-                }
-            }
-        }
-    }
-
-    /// AVX2-optimized implementation.
-    /// Always compiled on x86_64 with AVX2 for benchmarking comparisons.
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    mod avx2_impl {
-        use std::arch::x86_64::*;
-
-        /// Unsafe AVX2 kernel to accumulate distances for one block of 32 vectors.
-        ///
-        /// This is a literal port of the original `accumulate_one_block`
-        /// routine from the C++ implementation
-        /// [cite: gaoj0017/rabitq/RaBitQ-785450bae8b8ad9c5025159f5f70270e92f7084e/src/fast_scan.h].
-        /// The logic keeps four accumulators that separately track the two
-        /// sub-quantizers for the lower (0-15) and upper (16-31) halves of the
-        /// block before recombining them into the final distance vector.
-        #[target_feature(enable = "avx2")]
-        unsafe fn accumulate_one_block<const B: usize>(
-            codes: *const u8,
-            lut: *const u8,
-            result: *mut u16,
-        ) {
-            let m = B / 4;
-            let low_mask = _mm256_set1_epi8(0x0F);
-            let mut accu0 = _mm256_setzero_si256();
-            let mut accu1 = _mm256_setzero_si256();
-            let mut accu2 = _mm256_setzero_si256();
-            let mut accu3 = _mm256_setzero_si256();
-
-            let mut codes_ptr = codes as *const __m256i;
-            let mut lut_ptr = lut as *const __m256i;
-
-            // Loop over sub-quantizers, 2 at a time (m, m+1)
-            for _ in 0..(m / 2) {
-                // Load 32 bytes of packed codes
-                // c[0..15] = [vec0_m | vec16_m << 4, ..., vec15_m | vec31_m << 4]
-                // c[16..31] = [vec0_m+1 | vec16_m+1 << 4, ..., vec15_m+1 | vec31_m+1 << 4]
-                let c = _mm256_loadu_si256(codes_ptr);
-                let lo = _mm256_and_si256(c, low_mask);
-                let hi = _mm256_and_si256(_mm256_srli_epi16(c, 4), low_mask);
-
-                // Load 32 bytes of LUTs
-                let lut_m = _mm256_loadu_si256(lut_ptr);
-
-                // Perform 64 parallel table lookups
-                let res_lo = _mm256_shuffle_epi8(lut_m, lo);
-                let res_hi = _mm256_shuffle_epi8(lut_m, hi);
-
-                // Accumulate results exactly like the C++ kernel
-                accu0 = _mm256_add_epi16(accu0, res_lo);
-                accu1 = _mm256_add_epi16(accu1, _mm256_srli_epi16(res_lo, 8));
-                accu2 = _mm256_add_epi16(accu2, res_hi);
-                accu3 = _mm256_add_epi16(accu3, _mm256_srli_epi16(res_hi, 8));
-
-                // Advance pointers
-                codes_ptr = codes_ptr.add(1);
-                lut_ptr = lut_ptr.add(1);
-            }
-
-            // Recombine accumulators for vectors 0-15
-            accu0 = _mm256_sub_epi16(accu0, _mm256_slli_epi16(accu1, 8));
-            let dis0 = _mm256_add_epi16(
-                _mm256_permute2f128_si256(accu0, accu1, 0x21),
-                _mm256_blend_epi32(accu0, accu1, 0xF0),
-            );
-            _mm256_storeu_si256(result as *mut __m256i, dis0);
-
-            // Recombine accumulators for vectors 16-31
-            accu2 = _mm256_sub_epi16(accu2, _mm256_slli_epi16(accu3, 8));
-            let dis1 = _mm256_add_epi16(
-                _mm256_permute2f128_si256(accu2, accu3, 0x21),
-                _mm256_blend_epi32(accu2, accu3, 0xF0),
-            );
-            _mm256_storeu_si256(result.add(16) as *mut __m256i, dis1);
-        }
-
-        /// Public AVX2 function.
-        pub fn fast_scan_avx2<const B: usize>(
-            packed_codes: &[u8],
-            luts: &[u8],
-            results: &mut [u16],
-        ) {
-            let m = B / 4;
-            let n_vecs = results.len();
-            if n_vecs == 0 {
-                return;
-            }
-            assert_eq!(
-                n_vecs % 32,
-                0,
-                "Vector count must be a multiple of 32 for AVX2 FastScan"
-            );
-
-            let n_blocks = n_vecs / 32;
-            let block_size_bytes = (m / 2) * 32;
-
-            assert_eq!(
-                packed_codes.len(),
-                n_blocks * block_size_bytes,
-                "Packed codes length is incorrect"
-            );
-            assert_eq!(luts.len(), m * 16, "LUTs length is incorrect");
-
-            let codes_ptr = packed_codes.as_ptr();
-            let luts_ptr = luts.as_ptr();
-            let results_ptr = results.as_mut_ptr();
-
-            for i in 0..n_blocks {
-                unsafe {
-                    accumulate_one_block::<B>(
                         codes_ptr.add(i * block_size_bytes),
                         luts_ptr,
                         results_ptr.add(i * 32),
@@ -1349,7 +1226,7 @@ impl<'a, const B: usize> RabitqFastScanOracle<'a, B> {
         self.fastscan
     }
 
-    __EVOLVE_BLOCK__
+    __EVOLVE_ORACLE_BLOCK__
 }
 
 impl<const B: usize> DistanceOracle for RabitqFastScanOracle<'_, B> {

@@ -1,14 +1,23 @@
+#[cfg(target_arch = "x86_64")]
 use scratch::data_handling::dataset::VectorDataset;
+#[cfg(target_arch = "x86_64")]
 use scratch::data_handling::rabitq_fast_scan::{RabitqFastScan, BLOCK_SIZE};
+#[cfg(target_arch = "x86_64")]
 use std::time::Instant;
 
+#[cfg(target_arch = "x86_64")]
 const DIM: usize = 1536;
+#[cfg(target_arch = "x86_64")]
 const N_VECS: usize = 1024 * 64;
+#[cfg(target_arch = "x86_64")]
 const N_QUERIES: usize = 64;
+#[cfg(target_arch = "x86_64")]
 const OUTER_ITERS: usize = 6;
+#[cfg(target_arch = "x86_64")]
 const WARMUP_QUERIES: usize = 2;
 
 #[inline]
+#[cfg(target_arch = "x86_64")]
 fn splitmix64(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let mut z = x;
@@ -18,12 +27,14 @@ fn splitmix64(mut x: u64) -> u64 {
 }
 
 #[inline]
+#[cfg(target_arch = "x86_64")]
 fn random_f32(seed: u64) -> f32 {
     let bits = splitmix64(seed);
     let unit = (bits as f64) / (u64::MAX as f64);
     (unit * 2.0 - 1.0) as f32
 }
 
+#[cfg(target_arch = "x86_64")]
 fn make_random_dataset(n: usize, dim: usize, seed: u64) -> VectorDataset<f32> {
     let mut data = vec![0.0f32; n * dim];
     for i in 0..n {
@@ -35,6 +46,7 @@ fn make_random_dataset(n: usize, dim: usize, seed: u64) -> VectorDataset<f32> {
     VectorDataset::new(data.into_boxed_slice(), n, dim)
 }
 
+#[cfg(target_arch = "x86_64")]
 fn make_random_query(dim: usize, seed: u64) -> Vec<f32> {
     (0..dim)
         .map(|d| random_f32(seed ^ ((d as u64) << 1)))
@@ -42,13 +54,23 @@ fn make_random_query(dim: usize, seed: u64) -> Vec<f32> {
 }
 
 #[inline]
+#[cfg(target_arch = "x86_64")]
 fn update_checksum(mut checksum: u64, value: u64) -> u64 {
     checksum ^= value.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     checksum = checksum.rotate_left(27);
     checksum.wrapping_mul(0x94D0_49BB_1331_11EB)
 }
 
+#[cfg(target_arch = "x86_64")]
 fn main() {
+    if !std::arch::is_x86_feature_detected!("avx2") {
+        eprintln!(
+            "bench_rabitq_fast_scan_distance requires AVX2. \
+             Rebuild with RUSTFLAGS='-C target-cpu=native' on an AVX2-capable machine."
+        );
+        std::process::exit(1);
+    }
+
     let dataset = make_random_dataset(N_VECS, DIM, 0x1234_5678);
     let fastscan = RabitqFastScan::<DIM>::from_f32_dataset(&dataset);
     let queries: Vec<Vec<f32>> = (0..N_QUERIES)
@@ -100,4 +122,10 @@ fn main() {
     println!("BLOCK_SIZE={BLOCK_SIZE}");
     println!("N_QUERIES={N_QUERIES}");
     println!("OUTER_ITERS={OUTER_ITERS}");
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn main() {
+    eprintln!("bench_rabitq_fast_scan_distance targets the x86_64 AVX2 path.");
+    std::process::exit(1);
 }

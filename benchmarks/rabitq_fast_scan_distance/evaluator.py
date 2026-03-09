@@ -81,23 +81,35 @@ def _build(timeout: int = 300) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _load_evolve_block(program_path: str) -> str:
-    program_text = Path(program_path).read_text()
-    start_marker = "// EVOLVE-BLOCK-START"
-    end_marker = "// EVOLVE-BLOCK-END"
-
+def _load_marked_block(program_text: str, start_marker: str, end_marker: str) -> str:
     if start_marker in program_text and end_marker in program_text:
         start = program_text.index(start_marker) + len(start_marker)
         end = program_text.index(end_marker, start)
         return program_text[start:end].strip("\n")
+    raise ValueError(f"Missing required markers: {start_marker} / {end_marker}")
 
-    return program_text.strip("\n")
+
+def _load_evolve_blocks(program_path: str) -> dict[str, str]:
+    program_text = Path(program_path).read_text()
+    return {
+        "__EVOLVE_AVX2_BLOCK__": _load_marked_block(
+            program_text,
+            "// EVOLVE-AVX2-BLOCK-START",
+            "// EVOLVE-AVX2-BLOCK-END",
+        ),
+        "__EVOLVE_ORACLE_BLOCK__": _load_marked_block(
+            program_text,
+            "// EVOLVE-ORACLE-BLOCK-START",
+            "// EVOLVE-ORACLE-BLOCK-END",
+        ),
+    }
 
 
 def _render_candidate_source(program_path: str) -> str:
     template = SOURCE_TEMPLATE.read_text()
-    evolve_block = _load_evolve_block(program_path)
-    return template.replace("__EVOLVE_BLOCK__", evolve_block)
+    for placeholder, block in _load_evolve_blocks(program_path).items():
+        template = template.replace(placeholder, block)
+    return template
 
 
 def _ensure_reference_checksum() -> None:

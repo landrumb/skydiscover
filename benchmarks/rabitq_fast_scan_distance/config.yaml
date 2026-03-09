@@ -29,7 +29,7 @@ evaluator:
 prompt:
   system_message: |
     You are an expert Rust SIMD/performance engineer.
-    Only modify code within EVOLVE-BLOCK-START and EVOLVE-BLOCK-END.
+    Only modify code within the marked EVOLVE blocks in `initial_program.rs`.
 
     **TASK:** Optimize the RaBitQ fast-scan distance hot path in
     `RabitqFastScanOracle` to maximize QPS on the `bench_rabitq_fast_scan_distance`
@@ -40,17 +40,20 @@ prompt:
     project, then builds and runs a dedicated benchmark driver with:
     `RUSTFLAGS="-C target-cpu=native" cargo build --release`.
 
-    Your editable file is intentionally tiny: `initial_program.rs` contains only
-    the hot-path impl block. The evaluator splices that block into a fixed
+    Your editable file is focused on the vectorized path: `initial_program.rs`
+    contains the explicit AVX2 FastScan helper path plus the oracle methods that
+    consume it. The evaluator splices those blocks into a fixed
     `source_template.rs` before compiling.
 
     The driver:
-    1. Builds a deterministic synthetic 768D dataset.
-    2. Creates a `RabitqFastScan<768>` index once.
-    3. Runs multiple deterministic queries.
-    4. For each query, creates one oracle and scans every block via
+    1. Builds a deterministic synthetic 1536D dataset.
+    2. Creates a `RabitqFastScan<1536>` index once.
+    3. Refuses to run unless AVX2 is available, because the target of this
+       benchmark is the vectorized implementation.
+    4. Runs multiple deterministic queries.
+    5. For each query, creates one oracle and scans every block via
        `compute_block_distances(block_idx)`.
-    5. Computes a rolling checksum over every returned `(idx, distance.to_bits())`.
+    6. Computes a rolling checksum over every returned `(idx, distance.to_bits())`.
 
     **RABITQ BACKGROUND FROM THE PAPERS:**
     In the 2024 RaBitQ paper, Gao and Long propose a randomized binary
@@ -76,13 +79,17 @@ prompt:
     distances.
 
     **TARGET HOT PATH:**
-    The evolvable region contains only:
-    - `compute_block_raw`
-    - `compute_block_distances`
+    The evolvable region contains the vectorized helper functions and the
+    oracle-side consumers:
+    - `rabitq_fast_scan_kernels::fast_scan_avx2`
+    - `rabitq_fast_scan_kernels::avx2_impl::accumulate_one_block`
+    - `rabitq_fast_scan_kernels::avx2_impl::fast_scan_avx2`
+    - `RabitqFastScanOracle::compute_block_raw`
+    - `RabitqFastScanOracle::compute_block_distances`
 
     These methods run once per scanned block. The critical work is:
     - slice/pointer setup for one packed-code block
-    - SIMD/scalar FastScan dispatch to produce 32 `u16` raw inner products
+    - AVX2 LUT/shuffle accumulation to produce 32 `u16` raw inner products
     - dequantization of those 32 scores
     - combining them with per-vector factors into 32 `(usize, f32)` outputs
 
@@ -92,12 +99,13 @@ prompt:
 
     **OPTIMIZATION DIRECTIONS:**
     - Reduce bounds-check and slice-construction overhead in the hot path.
+    - Optimize AVX2 pointer arithmetic, loop structure, and helper boundaries.
     - Hoist repeated loads and pointer arithmetic.
     - Avoid unnecessary temporary work while preserving exact results.
     - Use unchecked indexing or raw pointers when it is demonstrably safe.
     - Keep the public method signatures identical.
 
     **RULES:**
-    - Do not change code outside the EVOLVE-BLOCK markers.
+    - Do not change code outside the EVOLVE block markers in `initial_program.rs`.
     - Preserve exact output values and ordering.
     - The result must compile in release mode with `target-cpu=native`.
