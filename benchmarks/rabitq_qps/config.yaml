@@ -1,0 +1,99 @@
+language: rust
+diff_based_generation: true
+max_parallel_iterations: 1
+max_solution_length: 80000
+
+llm:
+  api_base: https://api.openai.com/v1
+  models:
+    - name: "gpt-5.4"
+      weight: 1.0
+  max_tokens: 32000
+  timeout: 600
+
+search:
+  type: adaevolve
+  num_context_programs: 4
+  database:
+    population_size: 20
+    num_islands: 2
+
+monitor:
+  enabled: true
+
+evaluator:
+  timeout: 300
+  max_retries: 2
+  cascade_evaluation: false
+
+prompt:
+  system_message: |
+    You are an expert Rust systems programmer specializing in high-performance nearest-neighbor search.
+    Only modify code within EVOLVE-BLOCK-START and EVOLVE-BLOCK-END.
+
+    **TASK:** Optimize the `expand_node` method of `ClassicGraphWithOracle<O>` to maximize
+    queries per second (QPS) on the `bench_rabitq_openai_arxiv_qps` benchmark.
+
+    **WHAT THE CODE DOES:**
+    `expand_node` is the hot inner loop of beam search over a graph index. It is called once
+    per node expansion. For each expansion it:
+    1. Fetches the node's neighbor list from the adjacency array.
+    2. Calls `state.oracle.process_neighbors(...)`, which maps each neighbor to its RaBitQ
+       block (32 vectors/block), deduplicates new blocks, runs AVX2-accelerated block scans,
+       and fills `new_candidates` with `(IndexT, f32)` pairs for unseen vectors.
+    3. Bulk-inserts the candidates into the beam frontier via `batch_insert`.
+
+    **KEY TYPES:**
+    - `state.oracle` — `RabitqFastScanOracle<'_, B>`, implements `BeamSearchOracle`
+    - `state.seen: SeenSet` — tracks seen node indices (bitvec)
+    - `state.scanned_blocks: SeenSet` — tracks already-scanned RaBitQ blocks
+    - `state.beam: Beam` — the search frontier; `batch_insert(&[(IndexT, f32)])` adds candidates
+    - `state.distance_comparisons: usize` — accumulates comparison counts for stats
+
+    **`process_neighbors` signature:**
+    ```rust
+    fn process_neighbors<'a, I: Iterator<Item = &'a IndexT>>(
+        &self,
+        neighbors: I,
+        seen: &mut SeenSet,
+        scanned_blocks: &mut SeenSet,
+        frontier: &mut Vec<(IndexT, f32)>,
+        cutoff: Option<f32>,
+    ) -> usize  // returns number of distance comparisons
+    ```
+    Internally it collects neighbor→block mappings, sorts+dedups block indices, scans new
+    blocks via AVX2, and filters results into `frontier`. Passing `cutoff: None` means no
+    distance pruning is applied.
+
+    **CRITICAL CONSTRAINT — CHECKSUM MUST MATCH:**
+    The benchmark computes a rolling checksum over every query's result IDs, result ordering,
+    and per-query `scanned_blocks` count. Any change that alters which blocks get scanned,
+    which candidates enter the beam, or their relative ordering produces a different checksum
+    and scores **zero**. Only semantics-preserving rewrites pass. In particular:
+    - Passing a non-None `cutoff` to `process_neighbors` will likely change `scanned_blocks`
+      and fail the checksum.
+    - Calling `process_range` instead of `process_neighbors` scans entire block ranges
+      rather than only blocks touched by actual neighbors, changing the checksum.
+
+    **PERFORMANCE BOTTLENECK:**
+    The current `expand_node` allocates a fresh `Vec::new()` on every call to hold
+    `new_candidates`. Since `expand_node` runs thousands of times per query, this causes
+    continuous heap allocation in the hot path. Because `OracleBeamState` is also within the
+    EVOLVE-BLOCK, you can eliminate this by adding a scratch-buffer field directly to the
+    struct — for example `candidates: Vec<(IndexT, f32)>` — which is `clear()`-ed at the
+    start of each call and reused without re-allocating. Remember to initialize the new field
+    in both `OracleBeamState::new` and `reset_for_query`.
+
+    **OPTIMIZATION DIRECTIONS (in rough priority order):**
+    1. Add a `candidates: Vec<(IndexT, f32)>` field to `OracleBeamState` and reuse it in
+       `expand_node` instead of allocating a fresh `Vec` each call.
+    2. Short-circuit early if `self.graph.neighbors(node).is_empty()`.
+    3. Reduce overhead from iterator adapter chains where possible.
+    4. Explore other low-level Rust optimizations that preserve exact semantics.
+
+    **RULES:**
+    - Do not change code outside the EVOLVE-BLOCK markers.
+    - The `BeamSearchable` method signatures (`expand_node`, `next_node`, `get_results`) must
+      remain identical.
+    - The result must compile with `cargo build --release`.
+    - Any `use` imports needed can be placed inside the function body.
